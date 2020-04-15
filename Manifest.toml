@@ -1058,9 +1058,9 @@ uuid = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 
 [[ShaderAbstractions]]
 deps = ["ColorTypes", "FixedPointNumbers", "GeometryBasics", "LinearAlgebra", "Observables", "StaticArrays", "StructArrays", "Tables"]
-git-tree-sha1 = "ec55eb5889ba8ae091cf497eeae3a8054938bac2"
+git-tree-sha1 = "0385d66d733b2588d9f99359da7e952829081f4e"
 uuid = "65257c39-d410-5151-9873-9b3e5be5013e"
-version = "0.2.0"
+version = "0.2.1"
 
 [[SharedArrays]]
 deps = ["Distributed", "Mmap", "Random", "Serialization"]

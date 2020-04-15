@@ -100,9 +100,8 @@ for d in groupby(df, :set)
         for r in eachrow(g)
             lines!(axs[1], r.track.coords, color = colors[r.group])
         end
-        tight_ticklabel_spacing!.(axs)
-        xlims!(axs[1], -240, 240)
-        ylims!(axs[1], -200, 200)
+        # xlims!(axs[1], -240, 240)
+        # ylims!(axs[1], -200, 200)
         leg = ([LineElement(linestyle = nothing, color = colors[k]) for k in unique(g.group)], unique(g.group), string(g.set[1]))
         layout[1, length(axs) + 1] = LLegend(scene, leg...)
         FileIO.save(joinpath("figures", string(g.nest_coverage[1], " ", g.set[1], " tracks.pdf")), scene)
@@ -127,7 +126,8 @@ for d in groupby(df, :set)
                                   ylabel = "Y (cm)",
                                   xticklabelsize = 8,
                                   yticklabelsize = 8,
-                                  autolimitaspect = 1
+                                  aspect = DataAspect()
+                                  # autolimitaspect = 1
                                  )]
         for g in groupby(g, :group)
             c = only(g.ellipse)
@@ -140,19 +140,18 @@ for d in groupby(df, :set)
             xy = [Point2f0(r[g.point_type[1]]) for r in eachrow(d) if r.group == g.group[1] && r.nest_coverage == g.nest_coverage[1]]
             scatter!(axs[1], xy, color = colors[g.group[1]], marker = '●', strokewidth = 1, strokecolor = :white, markersize = 10px)
         end
-        scatter!(axs[1], [zero(Point2f0)], color = :black, marker = '⋆', strokewidth = 1, markersize = 20px)
-        tight_ticklabel_spacing!.(axs)
+        scatter!(axs[1], [zero(Point2f0)], color = :black, marker = '⋆', strokecolor = :black, strokewidth = 1, markersize = 20px)
         # xlims!(axs[1], -240, 240)
         # ylims!(axs[1], -200, 200)
         polys = [PolyElement(color = colors[k], strokecolor = :transparent) for k in unique(g.group)]
-        shapes = [MarkerElement(color = :black, marker = '⋆', strokecolor = :black, markersize = 20), 
-                  MarkerElement(color = :black, marker = '●', strokecolor = :black, strokewidth = 1), 
-                  MarkerElement(color = :black, marker = '▲', strokecolor = :black), 
+        shapes = [MarkerElement(color = :black, marker = '⋆', strokecolor = :black, strokewidth = 1, markersize = 20px), 
+                  MarkerElement(color = :black, marker = '●', strokecolor = :white, strokewidth = 1, markersize = 10px), 
+                  MarkerElement(color = :black, marker = '▲', strokecolor = :white, strokewidth = 1, markersize = 10px), 
                   [PolyElement(color = :black, strokecolor = :black, polypoints = mydecompose(Point2f0(0.5, 0.5), Vec2f0(0.25, 0.5))),
-                  MarkerElement(color = :white, marker = '+', strokecolor = :transparent), 
+                  MarkerElement(color = :white, marker = '+', strokecolor = :transparent, markersize = 10px), 
                   ]]
         leg = ([polys, shapes], [unique(g.group), ["nest", string(g.point_type[1]), "fictive_nest", "μ ± FWHM"]], [string(g.set[1]), "shapes"])
-        layout[1, length(axs) + 1] = LLegend(scene, leg...)
+        layout[1, length(axs) + 1] = LLegend(scene, leg...)#, patchsize = (9, 9))
         FileIO.save(joinpath("figures", string(g.nest_coverage[1], " ", g.point_type[1], " ", g.set[1], ".pdf")), scene)
         # FileIO.save(joinpath("figures", string(g.nest_coverage[1], " ", g.point_type[1], " ", g.set[1], ".png")), scene)
         # FileIO.save("a.pdf", scene)
@@ -162,5 +161,4 @@ end
 
 
 ##################### plot tracks with turning points
-
 
