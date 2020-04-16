@@ -30,8 +30,8 @@ data["nest#closed person#therese displace_direction#none displace_location#feede
 delete!(data, "nest#closed person#therese")
 df = DataFrame(parsetitle(k, r.data) for (k, v) in data for r in v.runs)
 
-_set(_::Missing) = "displacement"
-_set(_) = "transfer"
+_set(_::Missing) = "Displacement"
+_set(_) = "Transfer"
 @. df[!, :set] = _set(df.transfer)
 
 getgroup(r) = ismissing(r.displace_location) ? r.transfer : r.displace_location == "nest" ? "zero" : r.displace_direction
@@ -88,6 +88,13 @@ df[!, :gravity_center] .= searchcenter.(df.track)
 # d = dropmissing(df, :displace_direction)
 mydecompose(origin, radii) = [origin + radii .* Iterators.reverse(sincos(t)) for t in range(0, stop = 2π, length = 51)]
 
+shapes = [MarkerElement(color = :black, marker = '★', strokecolor = :transparent, strokewidth = 0),#, strokewidth = 1, markersize = 20px), 
+          MarkerElement(color = :black, marker = '●', strokecolor = :white),#, strokewidth = 1, markersize = 10px), 
+          MarkerElement(color = :black, marker = '▲', strokecolor = :white),#, strokewidth = 1, markersize = 10px), 
+          [PolyElement(color = :black, strokecolor = :black, polypoints = mydecompose(Point2f0(0.5, 0.5), Vec2f0(0.25, 0.5))),
+           MarkerElement(color = :white, marker = '+', strokecolor = :transparent, markersize = 10px), 
+          ]]
+
 for d in groupby(df, :set)
     for g in groupby(d, :nest_coverage)
         scene, layout = layoutscene(fontsize = 10);
@@ -140,18 +147,12 @@ for d in groupby(df, :set)
             xy = [Point2f0(r[g.point_type[1]]) for r in eachrow(d) if r.group == g.group[1] && r.nest_coverage == g.nest_coverage[1]]
             scatter!(axs[1], xy, color = colors[g.group[1]], marker = '●', strokewidth = 1, strokecolor = :white, markersize = 10px)
         end
-        scatter!(axs[1], [zero(Point2f0)], color = :black, marker = '⋆', strokecolor = :black, strokewidth = 1, markersize = 20px)
+        scatter!(axs[1], [zero(Point2f0)], color = :black, marker = '★', strokecolor = :transparent, strokewidth = 0, markersize = 10px)
         # xlims!(axs[1], -240, 240)
         # ylims!(axs[1], -200, 200)
         polys = [PolyElement(color = colors[k], strokecolor = :transparent) for k in unique(g.group)]
-        shapes = [MarkerElement(color = :black, marker = '⋆', strokecolor = :black, strokewidth = 1, markersize = 20px), 
-                  MarkerElement(color = :black, marker = '●', strokecolor = :white, strokewidth = 1, markersize = 10px), 
-                  MarkerElement(color = :black, marker = '▲', strokecolor = :white, strokewidth = 1, markersize = 10px), 
-                  [PolyElement(color = :black, strokecolor = :black, polypoints = mydecompose(Point2f0(0.5, 0.5), Vec2f0(0.25, 0.5))),
-                  MarkerElement(color = :white, marker = '+', strokecolor = :transparent, markersize = 10px), 
-                  ]]
-        leg = ([polys, shapes], [unique(g.group), ["nest", string(g.point_type[1]), "fictive_nest", "μ ± FWHM"]], [string(g.set[1]), "shapes"])
-        layout[1, length(axs) + 1] = LLegend(scene, leg...)#, patchsize = (9, 9))
+        leg = ([polys, shapes], [unique(g.group), ["nest", replace(string(g.point_type[1]), '_' => ' '), "fictive nest", "μ ± FWHM"]], [string(g.set[1]), "Shapes"])
+        layout[1, length(axs) + 1] = LLegend(scene, leg..., markersize = 10px, patchsize = (10, 10), rowgap = Fixed(0), titlegap = Fixed(5), groupgap = Fixed(10), titlehalign = :left, gridshalign = :left)
         FileIO.save(joinpath("figures", string(g.nest_coverage[1], " ", g.point_type[1], " ", g.set[1], ".pdf")), scene)
         # FileIO.save(joinpath("figures", string(g.nest_coverage[1], " ", g.point_type[1], " ", g.set[1], ".png")), scene)
         # FileIO.save("a.pdf", scene)
