@@ -87,30 +87,32 @@ df[!, :gravity_center] .= searchcenter.(df.track)
 
 # d = dropmissing(df, :displace_direction)
 mydecompose(origin, radii) = [origin + radii .* Iterators.reverse(sincos(t)) for t in range(0, stop = 2π, length = 51)]
+brighten(c, p = 0.5) = weighted_color_mean(p, c, colorant"white")
+darken(c, p = 0.5) = weighted_color_mean(p, c, colorant"black")
 
-shapes = [MarkerElement(color = :black, marker = '★', strokecolor = :transparent, strokewidth = 0),#, strokewidth = 1, markersize = 20px), 
-          MarkerElement(color = :black, marker = '●', strokecolor = :white),#, strokewidth = 1, markersize = 10px), 
-          MarkerElement(color = :black, marker = '▲', strokecolor = :white),#, strokewidth = 1, markersize = 10px), 
-          [PolyElement(color = :black, strokecolor = :black, polypoints = mydecompose(Point2f0(0.5, 0.5), Vec2f0(0.25, 0.5))),
+shapes = [MarkerElement(color = :black, marker = '▼', strokecolor = :black, markerstrokewidth = 1),#, markerstrokewidth = 1, markersize = 20px), 
+          MarkerElement(color = brighten(colorant"black", 0.75), marker = '●', strokecolor = :black, markerstrokewidth = 1),#, markerstrokewidth = 1, markersize = 10px), 
+          MarkerElement(color = brighten(colorant"black", 0.75), marker = '▲', strokecolor = :black, markerstrokewidth = 1),#, markerstrokewidth = 1, markersize = 10px), 
+          [PolyElement(color = brighten(colorant"black", 0.75), strokecolor = :transparent, polypoints = mydecompose(Point2f0(0.5, 0.5), Vec2f0(0.5, 0.75))),
            MarkerElement(color = :white, marker = '+', strokecolor = :transparent, markersize = 10px), 
           ]]
 
 for d in groupby(df, :set)
     for g in groupby(d, :nest_coverage)
-        scene, layout = layoutscene(fontsize = 10);
-        axs = layout[:h] = [LAxis(scene, 
+        scene, layout = layoutscene(fontsize = 10, font = "noto sans", resolution = (493.228346, 400.0));
+        ax = layout[1,1] = LAxis(scene, 
                                   xlabel = "X (cm)",
                                   ylabel = "Y (cm)",
                                   xticklabelsize = 8,
                                   yticklabelsize = 8,
-                                  aspect = DataAspect())]
+                                  aspect = DataAspect())
         for r in eachrow(g)
-            lines!(axs[1], r.track.coords, color = colors[r.group])
+            lines!(ax, r.track.coords, color = colors[r.group])
         end
-        # xlims!(axs[1], -240, 240)
-        # ylims!(axs[1], -200, 200)
+        # xlims!(ax, -240, 240)
+        # ylims!(ax, -200, 200)
         leg = ([LineElement(linestyle = nothing, color = colors[k]) for k in unique(g.group)], unique(g.group), string(g.set[1]))
-        layout[1, length(axs) + 1] = LLegend(scene, leg...)
+        layout[1, 2] = LLegend(scene, leg..., markersize = 10px, markerstrokewidth = 1, patchsize = (10, 10), rowgap = Fixed(0), titlegap = Fixed(5), groupgap = Fixed(10), titlehalign = :left, gridshalign = :left)
         FileIO.save(joinpath("figures", string(g.nest_coverage[1], " ", g.set[1], " tracks.pdf")), scene)
         # FileIO.save("a.pdf", scene)
     end
@@ -128,31 +130,32 @@ for d in groupby(df, :set)
     end
     for g in groupby(ellipses, [:point_type, :nest_coverage])
         scene, layout = layoutscene(fontsize = 10, font = "noto sans", resolution = (493.228346, 400.0));
-        axs = layout[:h] = [LAxis(scene, 
+
+        ax = layout[1,1] = LAxis(scene, 
                                   xlabel = "X (cm)",
                                   ylabel = "Y (cm)",
                                   xticklabelsize = 8,
                                   yticklabelsize = 8,
                                   aspect = DataAspect()
                                   # autolimitaspect = 1
-                                 )]
+                                 )
         for g in groupby(g, :group)
             c = only(g.ellipse)
             xy = mydecompose(c.origin, c.radius)
-            poly!(axs[1], xy, color = weighted_color_mean(0.5, colors[g.group[1]], colorant"white"))
+            poly!(ax, xy, color = brighten(colors[g.group[1]]))
         end
-        scatter!(axs[1], getfield.(g.ellipse, :origin), color = :white, marker = '+', markersize = 10px)
-        scatter!(axs[1], [Point2f0(intended[k]) for k in g.group], color = [colors[k] for k in g.group], strokewidth = 1, strokecolor = :white, marker = '▲', markersize = 10px)
+        scatter!(ax, getfield.(g.ellipse, :origin), color = :white, marker = '+', markersize = 10px)
+        scatter!(ax, [Point2f0(intended[k]) for k in g.group], color = [colors[k] for k in g.group], strokewidth = 1, strokecolor = [darken(colors[k]) for k in g.group], marker = '▲', markersize = 10px)
         for g in groupby(g, :group)
             xy = [Point2f0(r[g.point_type[1]]) for r in eachrow(d) if r.group == g.group[1] && r.nest_coverage == g.nest_coverage[1]]
-            scatter!(axs[1], xy, color = colors[g.group[1]], marker = '●', strokewidth = 1, strokecolor = :white, markersize = 10px)
+            scatter!(ax, xy, color = colors[g.group[1]], marker = '●', strokewidth = 1, strokecolor = darken(colors[g.group[1]]), markersize = 10px)
         end
-        scatter!(axs[1], [zero(Point2f0)], color = :black, marker = '★', strokecolor = :transparent, strokewidth = 0, markersize = 10px)
-        # xlims!(axs[1], -240, 240)
-        # ylims!(axs[1], -200, 200)
+        scatter!(ax, [zero(Point2f0)], color = :black, marker = '▼', strokecolor = :black, strokewidth = 1, markersize = 10px)
+        # xlims!(ax, -240, 240)
+        # ylims!(ax, -200, 200)
         polys = [PolyElement(color = colors[k], strokecolor = :transparent) for k in unique(g.group)]
         leg = ([polys, shapes], [unique(g.group), ["nest", replace(string(g.point_type[1]), '_' => ' '), "fictive nest", "μ ± FWHM"]], [string(g.set[1]), "Shapes"])
-        layout[1, length(axs) + 1] = LLegend(scene, leg..., markersize = 10px, patchsize = (10, 10), rowgap = Fixed(0), titlegap = Fixed(5), groupgap = Fixed(10), titlehalign = :left, gridshalign = :left)
+        layout[1, 2] = LLegend(scene, leg..., markersize = 10px, markerstrokewidth = 1, patchsize = (10, 10), rowgap = Fixed(0), titlegap = Fixed(5), groupgap = Fixed(10), titlehalign = :left, gridshalign = :left)
         FileIO.save(joinpath("figures", string(g.nest_coverage[1], " ", g.point_type[1], " ", g.set[1], ".pdf")), scene)
         # FileIO.save(joinpath("figures", string(g.nest_coverage[1], " ", g.point_type[1], " ", g.set[1], ".png")), scene)
         # FileIO.save("a.pdf", scene)
