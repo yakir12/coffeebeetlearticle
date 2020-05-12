@@ -6,7 +6,7 @@
 # 4 -> 1:52
 # 2 -> 2:49
 
-using DungAnalyse, Serialization, DataStructures, CoordinateTransformations, Rotations, DataFrames, Missings, Distributions, AngleBetweenVectors, LinearAlgebra
+using DungAnalyse, Serialization, DataStructures, CoordinateTransformations, Rotations, DataFrames, Missings, Distributions, AngleBetweenVectors, LinearAlgebra, StatsBase, OnlineStats
 using CairoMakie, MakieLayout, FileIO, AbstractPlotting, Colors
 import AbstractPlotting:px
 CairoMakie.activate!()
@@ -46,40 +46,42 @@ delete!(data, "nest#closed person#therese")
 df = DataFrame(parsetitle(k, r) for (k, v) in data for r in v.runs)
 
 switchdirections(_::Missing) = missing
-function switchdirections(d)
-    if d == "left"
-        "right"
-    elseif d == "right"
-        "left"
-    elseif d == "towards"
-        "away"
-    elseif d == "away"
-        "towards"
-    else
-        d
-    end
-end
-df[!, :displace_direction] .= switchdirections.(df.displace_direction)
+switchdirections(d) =   d == "left" ? "right" :
+                        d == "right" ? "left" :
+                        # d == "towards" ? "away" :
+                        # d == "away" ? "towards" : 
+                        d
+getgroup(displace_location::Missing, transfer, displace_direction) = transfer
+getgroup(displace_location, transfer, displace_direction) = displace_location == "nest" ? "zero" : displace_direction
+getset(_::Missing, d) = d == "none" ? "Closed" : "Displacement"
+getset(_, __) = "Transfer"
 
-getgroup(r) = ismissing(r.displace_location) ? r.transfer : r.displace_location == "nest" ? "zero" : r.displace_direction
-df[!, :group] .= getgroup.(eachrow(df))
-
-_set(_::Missing, d) = d == "none" ? "Closed" : "Displacement"
-_set(_, __) = "Transfer"
-@. df[!, :set] = _set(df.transfer, df.group)
+@. df[!, :displace_direction] = switchdirections.(df.displace_direction)
+@. df[!, :group] .= getgroup(df.displace_location, df.transfer, df.displace_direction)
+@. df[!, :set] = getset(df.transfer, df.group)
 
 categorical!(df, [:group, :set, :displace_direction, :displace_location, :nest_coverage, :transfer])
 levels!(df.group, ["none", "left", "right", "away", "towards", "zero", "back", "far"])
-filter!(r -> r.group ≠ "far" || r.title == "transfer#far person#therese", df)
 
-intended = Dict("none" => DungAnalyse.Point(0,0), 
-                "away" => DungAnalyse.Point(0, 50),
-                "towards" => DungAnalyse.Point(0, -50),
-                "right" => DungAnalyse.Point(50, 0),
-                "left" => DungAnalyse.Point(-50, 0),
-                "zero" => DungAnalyse.Point(0, -130),
-                "back" => DungAnalyse.Point(0,0),
-                "far" => DungAnalyse.Point(0,0))
+filter!(r -> r.group ≠ "far" || r.title == "transfer#far person#therese", df)
+df[!, :direction_deviation]  = [angle(r.fictive_nest - r.feeder, turningpoint(r.track) - r.feeder) for r in eachrow(df)]
+max_direction_deviation = maximum(r.direction_deviation for r in eachrow(df) if r.group ∉ ("far", "zero"))
+mean_direction_deviation = mean(r.direction_deviation for r in eachrow(df) if r.group ∉ ("far", "zero"))
+filter!(r -> r.group ≠ "far" || r.direction_deviation < 4mean_direction_deviation, df)
+
+intended(d::AbstractString) =  d == "none" ? DungAnalyse.Point(0,0) :
+                d == "away" ? DungAnalyse.Point(0, -50) :
+                d == "towards" ? DungAnalyse.Point(0, 50) :
+                d == "right" ? DungAnalyse.Point(50, 0) :
+                d == "left" ? DungAnalyse.Point(-50, 0) :
+                d == "zero" ? DungAnalyse.Point(0, -130) :
+                d == "back" ? DungAnalyse.Point(0,0) :
+                d == "far" ? DungAnalyse.Point(0,0) :
+                error("unknown displacement")
+intended(d) = intended(string(d))
+
+# df[!, :intended] .= intendedf.(df.group)
+# categorical!(df, :intended)
 
 _get_rotation_center(displace_location::Missing, nest, fictive_nest) = fictive_nest
 _get_rotation_center(displace_location, nest, fictive_nest) = displace_location == "feeder" ? fictive_nest : nest
@@ -93,6 +95,8 @@ function createtrans(nest, displace_location, fictive_nest, feeder)
     passmissing(rot ∘ trans)
 end
 
+df[!, :turning_point] .= zero.(df.feeder)
+df[!, :center_of_search] .= zero.(df.feeder)
 for r in eachrow(df)
     trans = createtrans(r.nest, r.displace_location, r.fictive_nest, r.feeder)
     @. r.track.coords = trans(r.track.coords)
@@ -100,26 +104,32 @@ for r in eachrow(df)
     r.feeder = trans(r.feeder)
     r.fictive_nest = trans(r.fictive_nest)
     r.nest = trans(r.nest)
+    Δ = intended(r.group) - r.fictive_nest
+    r.turning_point = turningpoint(r.track) + Δ
+    r.center_of_search = searchcenter(r.track) + Δ
 end
 
-df[!, :turning_point] .= zero.(df.feeder)
-df[!, :gravity_center] .= zero.(df.feeder)
-df[!, :direction_deviation] .= 0.0
-for r in eachrow(df)
-    tp = turningpoint(r.track)
-    r.turning_point = tp - r.fictive_nest + intended[r.group]
-    r.gravity_center = searchcenter(r.track) - r.fictive_nest + intended[r.group]
-    r.direction_deviation = angle(r.fictive_nest - r.feeder, tp - r.feeder)
+function highlight(c, i, n)
+    h = HSL(c)
+    HSL(h.h, h.s, i/(n + 1))
+end
+groups = levels(df.group)
+nc = length(groups)
+colors = OrderedDict(zip(groups, [colorant"black"; distinguishable_colors(nc - 1, [colorant"white", colorant"black"], dropseed = true)]))
+
+gdf = groupby(df, [:group, :nest_coverage])
+
+function getcolor(g)
+    n = length(g)
+    c = colors[g[1]]
+    [highlight(c, i, n) for i in eachindex(g)]
 end
 
-max_direction_deviation = maximum(r.direction_deviation for r in eachrow(df) if r.group ∉ ("far", "zero"))
-mean_direction_deviation = mean(r.direction_deviation for r in eachrow(df) if r.group ∉ ("far", "zero"))
-# filter!(r -> r.direction_deviation < 4mean_direction_deviation, df)
-
+DataFrames.transform!(gdf, :group => getcolor => :color)
 
 ############################## Descriptive stats ################################################
 
-d = stack(df, [:turning_point, :gravity_center], variable_name = :point_type, value_name = :point_xy)
+d = stack(df, [:turning_point, :center_of_search], variable_name = :point_type, value_name = :point_xy)
 gd = groupby(d, [:point_type, :group, :nest_coverage])
 meanstd(x) = (μ = mean(x); Ref(μ .± std(x, mean = μ)))
 g = copy(combine(gd, :point_xy => meanstd => :point_xy, nrow))
@@ -133,6 +143,7 @@ tbl = d
 myformat(_::Missing) = "-"
 myformat(x::Measurement) = string(round(Int, x.val), "±", round(Int, x.err))
 myformat(xs::AbstractVector{String}) = string("(", xs[1], ",", xs[2], ")")
+myformat(xs::AbstractVector{Float64}) = string("(", round(xs[1], digits = 2), ",", round(xs[2], digits = 2), ")")
 myformat(xs::AbstractVector{Measurement{T}}) where {T <: Real} = myformat(myformat.(xs))
 
 open(joinpath("tables", "table1.txt"), "w") do io
@@ -158,26 +169,113 @@ df.search_speed = [foo(track.rawcoords[track.tp:end]) for track in df.track]
 v = combine(groupby(df, :group), :homing_speed => mean ∘ skipmissing, :search_speed => mean ∘ skipmissing)
 mean(skipmissing(vcat(df.homing_speed, df.search_speed)))
 
-######################## common traits for the plots 
-#
-function highlight(c, i, n)
-    h = HSL(c)
-    HSL(h.h, h.s, i/(n + 1))
-end
-groups = levels(df.group)
-nc = length(groups)
-colors = OrderedDict(zip(groups, [colorant"black"; distinguishable_colors(nc - 1, [colorant"white", colorant"black"], dropseed = true)]))
+################### displaced closed nest stats
+
+roundsig(x) = x ≤ 0.05 ? @sprintf("%.2g", x) : "ns"
 
 gdf = groupby(df, [:group, :nest_coverage])
-DataFrames.transform!(gdf, :group, nrow => :n)
-DataFrames.transform!(gdf, :group => eachindex => :id)
-DataFrames.transform!(gdf, :group => (g -> colors[g[1]]) => :groupcolor)
-df.color = highlight.(df.groupcolor, df.id, df.n)
+g = gdf[[(group = group, nest_coverage = "closed") for group in ("none", "right","left","towards", "away")]]
+
+HypothesisTests.pvalue(t::StatsModels.TableRegressionModel) = GLM.coeftable(t).cols[4][2]
+
+n = 10^6
+tbls = map((:turning_point, :center_of_search)) do point
+    data = combine(g, point => (x -> x .- Ref(mean(x))) => :centered)
+    x1 = [r.centered for r in eachrow(data) if r.group == "none"]
+    x2 = [r.centered for r in eachrow(data) if r.group ≠ "none"]
+    tx = ApproximatePermutationTest(first.(x1), first.(x2), var, n)
+    ty = ApproximatePermutationTest(last.(x1), last.(x2), var, n)
+    σ = pvalue.([tx, ty], tail = :left)
+    nσ = length(x1) + length(x2)
+    @printf "Is the %s variance of the none group, (%i, %i) significantly smaller than the variancve of the displaced groups, (%i, %i)? P = (%.2g, %.2g) (n = %i)\n" replace(string(point), '_' => ' ') var(x1)... var(x2)... σ... nσ
+    data = combine(g, point => (x -> first.(x)) => :x, point => (x -> last.(x)) => :y, :group => (x -> first.(intended.(x))) => :ix, :group => (x -> last.(intended.(x))) => :iy)
+    tx = lm(@formula(ix ~ x), data)
+    ty = lm(@formula(iy ~ y), data)
+    nμ = nrow(data)
+    @printf "Is the effect (%.2f, %.2f) of the displacement on the %s significant? P = (%.2g, %.2g) (n = %i)\n" coef(tx)[2] coef(ty)[2] replace(string(point), '_' => ' ') pvalue(tx) pvalue(ty) nμ
+    combine(g, [:group, point] => ((g, x) -> myformat(roundsig.(pvalue.([
+                                                                         OneSampleTTest(first.(x), first(intended(g[1]))), 
+                                                                         OneSampleTTest(last.(x),   last(intended(g[1])))
+                                                                        ])))) => point, nrow => :n)
+end
+tbl = hcat(tbls[1][!, Not(All(:n, :nest_coverage))], tbls[2][!, Not(All(:group, :nest_coverage))])
+m = Matrix(tbl)
+writedlm(joinpath("tables", "table2.csv"), m, ',')
+
+
+############### transfer far stats
+
+gdf = groupby(df, :group)
+group = "far"
+g = gdf[(group = group,)]
+
+P = Dict(point => myformat(pvalue.([OneSampleTTest(first.(g[!, point]), first(intended(group))), OneSampleTTest(last.(g[!, point]),   last(intended(group)))])) for point in (:turning_point, :center_of_search))
+nrow(g)
+
+
+############### transfer back stats
+
+gdf = groupby(df, :group)
+group = "back"
+g = gdf[(group = group,)]
+
+P = Dict(point => pvalue(ApproximatePermutationTest(first.(g[!, point]), last.(g[!, point]), var, n), tail = :left) for point in (:turning_point, :center_of_search))
+
+
+P = Dict(point => myformat(pvalue.([OneSampleTTest(first.(g[!, point]), first(intended(group))), OneSampleTTest(last.(g[!, point]),   last(intended(group)))])) for point in (:turning_point, :center_of_search))
+nrow(g)
+
+
+######################## common traits for the plots 
+#
+set_theme!(
+    font = "noto sans", #"Arial", # 
+    fontsize = 10,
+    resolution = (493.228346, 500.0),
+    linewidth = 1,
+    strokewidth = 1px, 
+    markersize = 3px, 
+    rowgap = Fixed(0), 
+    titlegap = Fixed(5), 
+    groupgap = Fixed(10), 
+    titlehalign = :left, 
+    gridshalign = :left,
+    patchsize = (1, 1),
+    LLegend = (markersize = 10px, markerstrokewidth = 1, patchsize = (10, 10), rowgap = Fixed(0), titlegap = Fixed(5), groupgap = Fixed(10), titlehalign = :left, gridshalign = :left, framecolor = :transparent), 
+    LAxis = (xticklabelsize = 8, yticklabelsize = 8, xlabel = "X (cm)", ylabel = "Y (cm)", aspect = DataAspect())
+)
+
+
+
+# take out the open away
 
 ######################## closed nest plots #######
 
-g = filter(r -> r.group == "none", df)
+function unused_space(ax)
+    used_space = ax.scene.px_area[]
+    suggestedbbox = ax.layoutobservables.suggestedbbox[]
+    difference = widths(suggestedbbox) .- widths(used_space)
+    # Vec2f0(0, difference[2])
+end
+mydecompose(origin, radii) = [origin + radii .* Iterators.reverse(sincos(t)) for t in range(0, stop = 2π, length = 51)]
+mydecompose(x) = mydecompose(x.origin, x.radii)
+brighten(c, p = 0.5) = weighted_color_mean(p, c, colorant"white")
+darken(c, p = 0.5) = weighted_color_mean(p, c, colorant"black")
+
+
+legendmarkers = OrderedDict(
+                            "burrow" => (color = :black, marker = '⋆', strokecolor = :black, markerstrokewidth = 0.5, strokewidth = 0.5, markersize = 25px),
+                            "fictive burrow" => (color = :white, marker = '⋆', strokecolor = :black, markerstrokewidth = 0.5, strokewidth = 0.5, markersize = 15px),
+                            "turning point" => (color = :black, marker = markers["turning_point"], strokecolor = :transparent, markersize = 5px),
+                            "center of search" => (color = :black, marker = markers["center_of_search"], strokecolor = :transparent, markersize = 5px),
+                            "μ ± FWHM" => [(color = brighten(colorant"black", 0.75), strokecolor = :transparent, polypoints = mydecompose(Point2f0(0.5, 0.5), Vec2f0(0.75, 0.5))),
+                                           (color = :white, marker = '+', strokecolor = :transparent, markersize = 10px), 
+                                          ])
+
+gdf = groupby(df, :group)
+g = DataFrame(gdf[(group = "none",)], copycols = false)
 sort!(g, :turning_point, by = norm)
+g.color .= getcolor(g.group)
 
 function binit(track, h, nbins, m, M)
     o = Union{Variance, Missing}[Variance() for _ in 1:nbins]
@@ -198,6 +296,7 @@ nbins = 6
 m, M = (0, 130)
 bins = range(m, stop = M, length = nbins + 1)
 h = Histogram(bins)
+g.id = 1:nrow(g)
 DataFrames.transform!(g, :id, :track => ByRow(x -> binit(x, h, nbins, m, M)) => :yv)
 
 μ = [Variance() for _ in 1:nbins]
@@ -207,13 +306,11 @@ end
 
 
 bandcolor = RGB(only(distinguishable_colors(1, [colorant"white"; g.color], dropseed = true))) #:yellow
-scene, layout = layoutscene(0, fontsize = 10, font = "noto sans", resolution = (493.228346, 400.0));
+scene, layout = layoutscene(0)
 ax = layout[1,1] = LAxis(scene, 
-                         xreversed = true,
+                         aspect = nothing, 
                          xlabel = "Distance to nest (cm)",
                          ylabel = "Speed (cm/s)",
-                         xticklabelsize = 8,
-                         yticklabelsize = 8,
                         )
 mbins = StatsBase.midpoints(bins)
 bh = band!(ax, mbins, mean.(μ) .- std.(μ), mean.(μ) .+ std.(μ), color = RGBA(bandcolor, 0.5))
@@ -228,243 +325,527 @@ FileIO.save("a.pdf", scene)
 FileIO.save("figures/speed with $nbins bins.pdf", scene)
 
 
-scene, layout = layoutscene(0, fontsize = 10, font = "noto sans", resolution = (493.228346, 400.0));
-ax = layout[1,1] = LAxis(scene, 
-                         xlabel = "X (cm)",
-                         ylabel = "Y (cm)",
-                         xticklabelsize = 8,
-                         yticklabelsize = 8,
-                         aspect = DataAspect())
+scene, layout = layoutscene(0)
+ax = layout[1,1] = LAxis(scene)
 for r in eachrow(g)
     lines!(ax, r.track.coords, color = r.color)
 end
+resize!(scene, round.(Int, size(scene) .- unused_space(ax))...)
 FileIO.save("a.pdf", scene)
 FileIO.save(joinpath("figures", "closed tracks.pdf"), scene)
 
-#=function distance2nest(track)
-    t = homing(track)
-    i = findfirst(>(0) ∘ last, t)
-    abs(first(t[i]))
-end=#
 d = g[1:3,:]
 postTP = 25
-scene, layout = layoutscene(0, fontsize = 10, font = "noto sans", resolution = (493.228346, 493.228346));
+scene, layout = layoutscene(0)
 # bigone = GridLayout()
-ax = layout[1:2,1] = LAxis(scene, 
-                         xlabel = "X (cm)",
-                         ylabel = "Y (cm)",
-                         xticklabelsize = 8,
-                         yticklabelsize = 8,
-                         aspect = DataAspect())
+ax = layout[1:2,1] = LAxis(scene)
 for r in eachrow(d)
     lines!(ax, r.track.coords, color = r.color)
 end
 rect = FRect2D(-10,-10,20,20)
 spinecolor = RGB(only(distinguishable_colors(1, [colorant"white"; d.color], dropseed = true))) #:yellow
 lines!(ax, rect, color = spinecolor)
-ax = LAxis(scene, 
-                         xlabel = "X (cm)",
-                         xticklabelsize = 8,
-                         yticklabelsize = 8,
-                         bottomspinecolor = spinecolor,
-                         topspinecolor = spinecolor,
-                         leftspinecolor = spinecolor,
-                         rightspinecolor = spinecolor,
-                         aspect = DataAspect())
+hidexdecorations!(ax, ticklabels = false, ticks = false, grid = false)
+ax = layout[2,2] = LAxis(scene, bottomspinecolor = spinecolor,
+           topspinecolor = spinecolor,
+           leftspinecolor = spinecolor,
+           rightspinecolor = spinecolor)
 for r in eachrow(d)
     lines!(ax, homing(r.track), color = r.color)
     lines!(ax, searching(r.track)[1:postTP], color = 1:postTP, colormap = [r.color, colorant"white"])
-    scatter!(ax, [r.turning_point], color = RGBA(r.color, 0.75), marker = '●', markersize = 5px)
+    scatter!(ax, [r.turning_point]; legendmarkers["turning point"]..., color = RGBA(r.color, 0.75))
 end
-scatter!(ax, [zero(Point2f0)], color = :black, strokecolor = :black, marker = '⋆', strokewidth = 0.5, markersize = 35px)
+scatter!(ax, [zero(Point2f0)]; legendmarkers["nest"]...)
 ax.targetlimits[] = rect
-c = colors["none"]
-shapes = [MarkerElement(color = :black, marker = '⋆', strokecolor = :black, markerstrokewidth = 0.5, markersize = 35px),
-          LineElement(linestyle = nothing, color = c),
-          MarkerElement(color = RGBA(c, 0.75), marker = '●', strokecolor = :transparent, markersize = 5px)
-         ];
-leg =  LLegend(scene, shapes, ["nest", "track", "turning point"], markersize = 10px, linewidth = 1, markerstrokewidth = 1, patchsize = (10, 10), rowgap = Fixed(0), titlegap = Fixed(5), groupgap = Fixed(10), titlehalign = :left, gridshalign = :left);
-zoomed = GridLayout()
-zoomed[1:2,1:2] = leg;
-zoomed[2:3,1:2] = ax;
-layout[1:2, 2] = zoomed;
+hidexdecorations!(ax, ticklabels = false, ticks = false, grid = false)
+hideydecorations!(ax, ticklabels = false, ticks = false, grid = false)
+x = filter(kv -> first(kv) ∈ ("nest", "turning point"), legendmarkers)
+x["track"] = (linestyle = nothing, color = :black)
+layout[1,2] = LLegend(scene, apply_element(values(x)), collect(keys(x)))
+layout[3,1:2] = LText(scene, "X (cm)")
+# resize!(scene, round.(Int, size(scene) .- unused_space(ax))...)
 FileIO.save("a.pdf", scene)
 FileIO.save(joinpath("figures", "turning point zoom 3 closed tracks.pdf"), scene)
 
 
+######################## plot ####################
 
-mydecompose(origin, radii) = [origin + radii .* Iterators.reverse(sincos(t)) for t in range(0, stop = 2π, length = 51)]
-brighten(c, p = 0.5) = weighted_color_mean(p, c, colorant"white")
-darken(c, p = 0.5) = weighted_color_mean(p, c, colorant"black")
-markers = Dict("turning_point" => '●', "gravity_center" => '■')
-shapes = [MarkerElement(color = :black, marker = '⋆', strokecolor = :black, markerstrokewidth = 0.5, markersize = 35px),#, markerstrokewidth = 1, markersize = 20px), 
-          MarkerElement(color = :white, marker = '⋆', strokecolor = :black, markerstrokewidth = 0.5, markersize = 15px),#, markerstrokewidth = 1, markersize = 20px), 
-          MarkerElement(color = :black, marker = markers["turning_point"], strokecolor = :transparent, markersize = 5px),#, markerstrokewidth = 0),#, markerstrokewidth = 1, markersize = 10px), 
-          MarkerElement(color = :black, marker = markers["gravity_center"], strokecolor = :transparent, markersize = 5px),#, markerstrokewidth = 0),#, markerstrokewidth = 1, markersize = 10px), 
-          [PolyElement(color = brighten(colorant"black", 0.75), strokecolor = :transparent, polypoints = mydecompose(Point2f0(0.5, 0.5), Vec2f0(0.75, 0.5))),
-           MarkerElement(color = :white, marker = '+', strokecolor = :transparent, markersize = 10px), 
-          ]]
-d = g
-dfstacked = stack(d, [:turning_point, :gravity_center], variable_name = :point_type, value_name = :point_xy)
-ellipses = combine(groupby(dfstacked, :point_type)) do g
-    n = length(g.point_xy)
+
+apply_element(xs) = apply_element.(xs)
+apply_element(x::NamedTuple) =  :marker ∈ keys(x) ? MarkerElement(; x...) :
+                                :linestyle ∈ keys(x) ? LineElement(; x...) :
+                                PolyElement(; x...)
+
+gdf = groupby(df, [:group, :nest_coverage])
+g = gdf[[(group = group, nest_coverage = "closed") for group in ("right","left","towards", "away")]]
+
+polys = OrderedDict(string(k.group) => (color = colors[k.group], strokecolor = :transparent) for k in keys(g))
+
+
+scene, layout = layoutscene(0)
+ax = layout[1,1] = LAxis(scene)
+for gg in g
+    for r in eachrow(gg)
+        lines!(ax, r.track.coords, color = r.color)
+    end
+end
+leg = ([LineElement(linestyle = nothing, color = colors[k]) for k in getfield.(NamedTuple.(keys(g)), :group)], get.(getfield.(NamedTuple.(keys(g)), :group)))
+layout[1, 2] = LLegend(scene, leg...)
+layout[1, 1, TopLeft()] = LText(scene, "A");
+FileIO.save(joinpath("figures", "closed displacement tracks.pdf"), scene)
+FileIO.save("a.pdf", scene)
+
+function getellipse(xy)
+    n = length(xy)
     X = Array{Float64}(undef, 2, n)
     for i in 1:n
-        X[:,i] = g.point_xy[i]
+        X[:,i] = xy[i]
     end
     dis = fit(DiagNormal, X)
     radii = sqrt(2log(2))*sqrt.(var(dis)) # half the FWHM
-    ellipse = (origin = Point2f0(mean(dis)), radius = Vec2f0(radii))
-    (ellipse = ellipse, xy = Ref(g.point_xy))
+    (origin = Point2f0(mean(dis)), radii = Vec2f0(radii))
 end
-scene, layout = layoutscene(0, fontsize = 10, font = "arial", resolution = (493.228346, 300.0));
+
+scene, layout = layoutscene(0)
 axs = []
-for (i, r) in enumerate(eachrow(ellipses))
-    ax = layout[1,i] = LAxis(scene, 
-                             # xlabel = "X (cm)",
-                             # ylabel = "Y (cm)",
-                             xticklabelsize = 8,
-                             yticklabelsize = 8,
-                             aspect = DataAspect()
-                             # autolimitaspect = 1
-                            )
+for (i, point_type) in enumerate(("turning_point", "center_of_search"))
+    ax = layout[1,i] = LAxis(scene)
+    scatter!(ax, [zero(Point2f0)]; legendmarkers["nest"]...)
+    for (k, gg) in pairs(g)
+        xy = gg[!, point_type]
+        ellipse = getellipse(xy)
+        c = colors[k.group]
+        poly!(ax, mydecompose(ellipse), color = brighten(c, 0.25))
+        scatter!(ax, [ellipse.origin]; legendmarkers["μ ± FWHM"][2]...)
+        scatter!(ax, xy; legendmarkers[replace(point_type, "_" => " ")]..., color = RGBA(c, 0.75))
+        scatter!(ax, [Point2f0(intended(k.group))]; legendmarkers["fictive nest"]..., strokecolor = colors[k.group])
+    end
     push!(axs, ax)
-    c = r.ellipse
-    xy = mydecompose(c.origin, c.radius)
-    poly!(ax, xy, color = brighten(colors["none"], 0.25))
-    scatter!(ax, [c.origin], color = :white, marker = '+', markersize = 10px)
-    scatter!(ax, [zero(Point2f0)], color = :black, strokecolor = :black, marker = '⋆', strokewidth = 0.5, markersize = 35px)
-    scatter!(ax, [Point2f0(intended["none"])], color = :white, strokecolor = colors["none"], marker = '⋆', strokewidth = 0.5, markersize = 15px)
-    scatter!(ax, r.xy[], color = RGBA(colors["none"], 0.75), marker = markers[get(r.point_type)], markersize = 5px)
 end
-axs[1].ylabel = "Y (cm)"
 hideydecorations!(axs[2], grid = false)
+hidexdecorations!.(axs, grid = false, ticklabels = false, ticks = false)
 layout[2, 1:2] = LText(scene, "X (cm)");
 linkaxes!(axs...)
-label_c = layout[1, 1, TopLeft()] = LText(scene, "C");
-label_d = layout[1, 2, TopLeft()] = LText(scene, "D");
-polys = [PolyElement(color = colors[k], strokecolor = :transparent) for k in unique(g.group)];
-leg = (shapes, ["nest", "fictive nest", "turning point", "gravity center", "μ ± FWHM"]);
-layout[1, 3] = LLegend(scene, leg..., markersize = 10px, markerstrokewidth = 1, patchsize = (10, 10), rowgap = Fixed(0), titlegap = Fixed(5), groupgap = Fixed(10), titlehalign = :left, gridshalign = :left);
+label_c = layout[1, 1, TopLeft()] = LText(scene, "B");
+label_d = layout[1, 2, TopLeft()] = LText(scene, "C");
+layout[1, 3] = LLegend(scene, apply_element.(values.([polys, legendmarkers])), collect.(keys.([polys, legendmarkers])), ["Displacements", "Points"])
+resize!(scene, round.(Int, size(scene) .- unused_space(axs[1]))...)
+FileIO.save(joinpath("figures", "displacement turning point and gravity center.pdf"), scene)
+
+
+# 3 open away tracks
+g = DataFrame(gdf[(group = "away", nest_coverage = "open")], copycols = false)
+function distance2nest(track)
+    length(searching(track)) < 10 && return Inf
+    t = homing(track)
+    i = findfirst(>(0) ∘ last, t)
+    isnothing(i) ? Inf : abs(first(t[i]))
+end
+sort!(g, :track, by = distance2nest)
+d = g[1:3,:]
+c = colors[d.group[1]]
+scene, layout = layoutscene(0)
+ax = layout[1:2,1] = LAxis(scene)
+for r in eachrow(d)
+    lines!(ax, r.track.coords, color = r.color)
+    scatter!(ax, [turningpoint(r.track)]; legendmarkers["turning point"]..., color = RGBA(c, 0.75))
+end
+scatter!(ax, [zero(Point2f0)]; legendmarkers["nest"]...)
+x = filter(kv -> first(kv) ∈ ("nest", "turning point"), legendmarkers)
+x["track"] = (linestyle = nothing, color = :black)
+layout[1, 2] = LLegend(scene, apply_element(values(x)), collect(keys(x)))
+layout[1, 1, TopLeft()] = LText(scene, "D");
+resize!(scene, round.(Int, size(scene) .- unused_space(ax))...)
+FileIO.save(joinpath("figures", "3 open away tracks.pdf"), scene)
+
 FileIO.save("a.pdf", scene)
-FileIO.save(joinpath("figures", "none turning point and gravity center.pdf"), scene)
-
-# possibel speed and direction plots
-#=function midpoints(x)
-n = length(x)
-y = Vector{Float64}(undef, n - 1)
-for i = 1:n-1
-y[i] = (x[i] + x[i + 1])/2
-end
-return y
-end
-
-xtick = -40:20:40
-xticklabels = string.(xtick)
-xticklabels[3] = "TP"
-meandegree(x) = rad2deg(angle(sum(exp, im*x)))
-bins = -50:10:50
-labels = string.(Int.(midpoints(bins)))
-
-d = DataFrame(x = Int[], y = Float64[], id = Int[], color = RGB[])
-categorical!(d, :id)
-for (i, r) in enumerate(eachrow(g))
-Δ = diff(r.track.coords)
-l = norm.(Δ)
-L = cumsum(l)
-tp = r.track.tp
-L .-= L[tp]
-i1 = findfirst(L .> -50)
-i2 = findlast(L .< 50)
-L = L[i1:i2]
-v = l[i1:i2]./step(r.track.t)
-l = parse.(Int, collect(cut(L, bins, labels = labels)))
-a = DataFrame(x = l, y = v)
-mu = aggregate(a, :x, mean)
-rename!(mu, :y_mean => :y)
-# @pgf push!(p, Plot({color = c}, Table(mu)))
-mu[!, :id] .= i
-mu[!, :color] .= r.color
-append!(d, mu)
-end
-
-d1 = by(d, :id) do g
-(coords = [Point2f0.(zip(g.x, g.y))], color = [g.color[1]])
-end
-
-scene, layout = layoutscene(0, fontsize = 10, font = "noto sans", resolution = (493.228346, 400.0));
-ax = layout[1,1] = LAxis(scene, 
-xlabel = "X (cm)",
-ylabel = "Y (cm)",
-xticklabelsize = 8,
-yticklabelsize = 8)
-for r in eachrow(d1)
-lines!(ax, r.coords, color = r.color)
-end
-FileIO.save("a.pdf", scene)
-FileIO.save("a.png", scene, px_per_unit = 2)=#
 
 
-
-######################## plot ####################
-
-# d = filter(r -> r.displace_direction ≠ "none" && r.nest_coverage == "closed", dropmissing(df, :displace_direction))
-
-d = groupby(df, [:displace_direction, :nest_coverage])
-g = d[[(displace_direction = dd, nest_coverage = "closed") for dd in ("right","left","towards", "away")]]
+##### zero vector
 
 
-scene, layout = layoutscene(0, fontsize = 10, font = "noto sans", resolution = (493.228346, 400.0));
-ax = layout[1,1] = LAxis(scene, 
-                         xlabel = "X (cm)",
-                         ylabel = "Y (cm)",
-                         xticklabelsize = 8,
-                         yticklabelsize = 8,
-                         aspect = DataAspect())
+gdf = groupby(df, :group)
+g = gdf[[("zero",)]]
 
+
+scene, layout = layoutscene(0)
+ax = layout[1,1] = LAxis(scene)
 for gg in g
     for r in eachrow(gg)
-        lines!(ax, r.track.coords, color = colors[r.group])
+        lines!(ax, r.track.coords, color = r.color)
     end
 end
-leg = ([LineElement(linestyle = nothing, color = colors[k]) for k in getfield.(NamedTuple.(keys(g)), :displace_direction)], get.(getfield.(NamedTuple.(keys(g)), :displace_direction)))
-layout[1, 2] = LLegend(scene, leg..., markersize = 10px, markerstrokewidth = 1, patchsize = (10, 10), rowgap = Fixed(0), titlegap = Fixed(5), groupgap = Fixed(10), titlehalign = :left, gridshalign = :left)
-FileIO.save(joinpath("figures", "closed displacement tracks.pdf"), scene)
+leg = ([LineElement(linestyle = nothing, color = colors[k]) for k in getfield.(NamedTuple.(keys(g)), :group)], get.(getfield.(NamedTuple.(keys(g)), :group)))
+# layout[1, 2] = LLegend(scene, leg...)
+layout[1, 1, TopLeft()] = LText(scene, "A");
+FileIO.save(joinpath("figures", "zero tracks.pdf"), scene)
+FileIO.save("a.pdf", scene)
+
+
+scene, layout = layoutscene(0)
+axs = []
+for (i, point_type) in enumerate(("turning_point", "center_of_search"))
+    ax = layout[1,i] = LAxis(scene)
+    scatter!(ax, [zero(Point2f0)]; legendmarkers["nest"]...)
+    for (k, gg) in pairs(g)
+        xy = gg[!, point_type]
+        ellipse = getellipse(xy)
+        c = colors[k.group]
+        poly!(ax, mydecompose(ellipse), color = brighten(c, 0.25))
+        scatter!(ax, [ellipse.origin]; legendmarkers["μ ± FWHM"][2]...)
+        scatter!(ax, xy; legendmarkers[replace(point_type, "_" => " ")]..., color = RGBA(c, 0.75))
+        scatter!(ax, [Point2f0(intended(k.group))]; legendmarkers["fictive nest"]..., strokecolor = colors[k.group])
+    end
+    push!(axs, ax)
+end
+hideydecorations!(axs[2], grid = false)
+hidexdecorations!.(axs, grid = false, ticklabels = false, ticks = false)
+layout[2, 1:2] = LText(scene, "X (cm)");
+linkaxes!(axs...)
+label_c = layout[1, 1, TopLeft()] = LText(scene, "B");
+label_d = layout[1, 2, TopLeft()] = LText(scene, "C");
+layout[1, 3] = LLegend(scene, apply_element(values(legendmarkers)), collect(keys(legendmarkers)))
+resize!(scene, round.(Int, size(scene) .- unused_space(axs[1]))...)
+FileIO.save("a.pdf", scene)
+
+FileIO.save(joinpath("figures", "zero turning point and gravity center.pdf"), scene)
+
+
+##### far
+
+g = gdf[[("far",)]]
+
+scene, layout = layoutscene(0)
+ax = layout[1,1] = LAxis(scene)
+for gg in g
+    for r in eachrow(gg)
+        lines!(ax, r.track.coords, color = r.color)
+    end
+end
+leg = ([LineElement(linestyle = nothing, color = colors[k]) for k in getfield.(NamedTuple.(keys(g)), :group)], get.(getfield.(NamedTuple.(keys(g)), :group)))
+# layout[1, 2] = LLegend(scene, leg...)
+layout[1, 1, TopLeft()] = LText(scene, "A");
+FileIO.save(joinpath("figures", "far tracks.pdf"), scene)
+FileIO.save("a.pdf", scene)
+
+
+scene, layout = layoutscene(0)
+axs = []
+for (i, point_type) in enumerate(("turning_point", "center_of_search"))
+    ax = layout[1,i] = LAxis(scene)
+    scatter!(ax, [zero(Point2f0)]; legendmarkers["nest"]...)
+    for (k, gg) in pairs(g)
+        xy = gg[!, point_type]
+        ellipse = getellipse(xy)
+        c = colors[k.group]
+        poly!(ax, mydecompose(ellipse), color = brighten(c, 0.25))
+        scatter!(ax, [ellipse.origin]; legendmarkers["μ ± FWHM"][2]...)
+        scatter!(ax, xy; legendmarkers[replace(point_type, "_" => " ")]..., color = RGBA(c, 0.75))
+        scatter!(ax, [Point2f0(intended(k.group))]; legendmarkers["fictive nest"]..., strokecolor = colors[k.group])
+    end
+    push!(axs, ax)
+end
+hideydecorations!(axs[2], grid = false)
+hidexdecorations!.(axs, grid = false, ticklabels = false, ticks = false)
+layout[2, 1:2] = LText(scene, "X (cm)");
+linkaxes!(axs...)
+label_c = layout[1, 1, TopLeft()] = LText(scene, "B");
+label_d = layout[1, 2, TopLeft()] = LText(scene, "C");
+layout[1, 3] = LLegend(scene, apply_element(values(legendmarkers)), collect(keys(legendmarkers)))
+resize!(scene, round.(Int, size(scene) .- unused_space(axs[1]))...)
+FileIO.save("a.pdf", scene)
+FileIO.save(joinpath("figures", "far turning point and gravity center.pdf"), scene)
 
 
 
 
-# FileIO.save("a.pdf", scene)
 
 
 
-#=for r in eachrow(df)
-trans = passmissing(Translation(intended[r.group] - r.fictive_nest))
-@. r.track.coords = trans(r.track.coords)
-r.feeder = trans(r.feeder)
-r.fictive_nest = trans(r.fictive_nest)
-r.nest = trans(r.nest)
-end=#
 
-# max_direction_deviation = maximum(r.direction_deviation for r in eachrow(df) if r.group ∉ ("far", "zero"))
-# by(df, :group, :direction_deviation => x -> round(Int, rad2deg(maximum(x))))
-# max_direction_deviation = maximum(r.direction_deviation for r in eachrow(df) if r.group == "back")
 
-# x = filter(r -> r.group == "far", df)
-# x[!, :direction_deviation] .= round.(Int, rad2deg.(x.direction_deviation))
-# sort!(x, (:title, :direction_deviation))
-# x[:, [:comment, :direction_deviation]]
 
-# [r.metadata.setup[:azimuth] for r in data["transfer#far person#therese"].runs]
 
-# scene, layout = layoutscene(0, fontsize = 10, font = "noto sans", resolution = (493.228346, 400.0));
-# ax = layout[1, 1] = LAxis(scene, xlabel = "direction deviation (°)", ylabel = "TP to fictive nest (cm)")
-# scatter!(ax, x.direction_deviation, norm.(turningpoint.(x.track)), markersize = 9px) 
-# FileIO.save("a.pdf", scene)
 
-# filter!(r -> r.group ≠ "far" || r.direction_deviation ≤ 2max_direction_deviation, df)
 
-# d = dropmissing(df, :displace_direction)
+
+
+
+
+
+
+
+
+
+
+
+
+######################## Figure 5 ################
+gdf = groupby(df, [:group, :nest_coverage])
+g = gdf[[(group = group, nest_coverage = "closed") for group in ("right","left","towards", "away")]]
+polys = OrderedDict(string(k.group) => (color = colors[k.group], strokecolor = :transparent) for k in keys(g))
+scene, layout = layoutscene(0)
+ax = layout[1,1] = LAxis(scene)
+for gg in g
+    for r in eachrow(gg)
+        lines!(ax, r.track.coords, color = r.color, linewidth = 0.3)
+    end
+end
+hidexdecorations!(ax, grid = false, ticklabels = false, ticks = false)
+hideydecorations!(ax, grid = false, ticklabels = false, ticks = false)
+# leg = ([LineElement(linestyle = nothing, color = colors[k]) for k in getfield.(NamedTuple.(keys(g)), :group)], get.(getfield.(NamedTuple.(keys(g)), :group)))
+# layout[1, 2] = LLegend(scene, leg...)
+layout[1, 1, TopLeft()] = LText(scene, "A");
+axs = []
+for (i, point_type) in enumerate(("turning_point", "center_of_search"))
+    ax = layout[2,i] = LAxis(scene)
+    scatter!(ax, [zero(Point2f0)]; legendmarkers["burrow"]...)
+    for (k, gg) in pairs(g)
+        xy = gg[!, point_type]
+        ellipse = getellipse(xy)
+        c = colors[k.group]
+        poly!(ax, mydecompose(ellipse), color = brighten(c, 0.25))
+        scatter!(ax, [ellipse.origin]; legendmarkers["μ ± FWHM"][2]...)
+        scatter!(ax, xy; legendmarkers[replace(point_type, "_" => " ")]..., color = RGBA(c, 0.75))
+        scatter!(ax, [Point2f0(intended(k.group))]; legendmarkers["fictive burrow"]..., strokecolor = colors[k.group])
+    end
+    push!(axs, ax)
+end
+hideydecorations!(axs[1], grid = false, ticklabels = false, ticks = false)
+hideydecorations!(axs[2], grid = false)
+hidexdecorations!.(axs, grid = false, ticklabels = false, ticks = false)
+layout[3, 1:2] = LText(scene, "X (cm)");
+linkaxes!(axs...)
+label_c = layout[2, 1, TopLeft()] = LText(scene, "C");
+label_d = layout[2, 2, TopLeft()] = LText(scene, "D");
+g = DataFrame(gdf[(group = "away", nest_coverage = "open")], copycols = false)
+sort!(g, :track, by = distance2nest)
+d = g[1:3,:]
+c = colors[d.group[1]]
+dd = GridLayout(scene)
+ax = dd[1,1] = LAxis(scene)
+for r in eachrow(d)
+    lines!(ax, r.track.coords, color = r.color, linewidth = 0.3)
+    scatter!(ax, [turningpoint(r.track)]; legendmarkers["turning point"]..., color = RGBA(c, 0.75))
+end
+scatter!(ax, [zero(Point2f0)]; legendmarkers["burrow"]...)
+hidexdecorations!(ax, grid = false, ticklabels = false, ticks = false)
+hideydecorations!(ax, grid = false, ticklabels = false, ticks = false)
+x = copy(legendmarkers);
+x["track"] = (linestyle = nothing, color = :black);
+dd[1, 2] = LLegend(scene, apply_element.(values.([polys, legendmarkers])), collect.(keys.([polys, legendmarkers])), ["Displacements", "Points"]);
+layout[1,2] = dd;
+layout[1, 2, TopLeft()] = LText(scene, "B");
+layout[1:2, 0] = LText(scene, "Y (cm)", rotation = π/2);
+# resize!(scene, round.(Int, size(scene) .- unused_space(ax))...)
+FileIO.save("a.pdf", scene)
+FileIO.save(joinpath("figures", "figure 5.pdf"), scene)
+
+
+
+
+
+######################## Figure 6 ################
+gdf = groupby(df, [:group])
+g = gdf[[("zero",)]]
+polys = OrderedDict(string(k.group) => (color = colors[k.group], strokecolor = :transparent) for k in keys(g))
+scene, layout = layoutscene(0)
+ax = layout[1,1] = LAxis(scene)
+for gg in g
+    for r in eachrow(gg)
+        lines!(ax, r.track.coords, color = r.color, linewidth = 0.3)
+    end
+end
+hidexdecorations!(ax, grid = false, ticklabels = false, ticks = false)
+layout[1, 1, TopLeft()] = LText(scene, "A");
+axs = []
+for (i, point_type) in enumerate(("turning_point", "center_of_search"))
+    ax = layout[1,i + 1] = LAxis(scene)
+    scatter!(ax, [zero(Point2f0)]; legendmarkers["burrow"]...)
+    for (k, gg) in pairs(g)
+        xy = gg[!, point_type]
+        ellipse = getellipse(xy)
+        c = colors[k.group]
+        poly!(ax, mydecompose(ellipse), color = brighten(c, 0.25))
+        scatter!(ax, [ellipse.origin]; legendmarkers["μ ± FWHM"][2]...)
+        scatter!(ax, xy; legendmarkers[replace(point_type, "_" => " ")]..., color = RGBA(c, 0.75))
+        scatter!(ax, [Point2f0(intended(k.group))]; legendmarkers["fictive burrow"]..., strokecolor = colors[k.group])
+    end
+    push!(axs, ax)
+end
+hideydecorations!(axs[1], grid = false, ticklabels = false, ticks = false)
+hideydecorations!(axs[2], grid = false)
+hidexdecorations!.(axs, grid = false, ticklabels = false, ticks = false)
+layout[2, 1:3] = LText(scene, "X (cm)");
+linkaxes!(axs...)
+label_c = layout[1, 2, TopLeft()] = LText(scene, "B");
+label_d = layout[1, 3, TopLeft()] = LText(scene, "C");
+x = copy(legendmarkers);
+x["track"] = (linestyle = nothing, color = :black);
+layout[1,4] = LLegend(scene, apply_element(values(legendmarkers)), collect(keys(legendmarkers)));
+resize!(scene, round.(Int, size(scene) .- unused_space(ax))...)
+FileIO.save("a.pdf", scene)
+FileIO.save(joinpath("figures", "figure 6.pdf"), scene)
+
+
+
+
+######################## Figure 7 ################
+gdf = groupby(df, [:group])
+g = gdf[[("far",)]]
+polys = OrderedDict(string(k.group) => (color = colors[k.group], strokecolor = :transparent) for k in keys(g))
+scene, layout = layoutscene(0)
+ax = layout[1,1] = LAxis(scene)
+for gg in g
+    for r in eachrow(gg)
+        lines!(ax, r.track.coords, color = r.color, linewidth = 0.3)
+    end
+end
+hidexdecorations!(ax, grid = false, ticklabels = false, ticks = false)
+layout[1, 1, TopLeft()] = LText(scene, "A");
+axs = []
+for (i, point_type) in enumerate(("turning_point", "center_of_search"))
+    ax = layout[1,i + 1] = LAxis(scene)
+    scatter!(ax, [zero(Point2f0)]; legendmarkers["burrow"]...)
+    for (k, gg) in pairs(g)
+        xy = gg[!, point_type]
+        ellipse = getellipse(xy)
+        c = colors[k.group]
+        poly!(ax, mydecompose(ellipse), color = brighten(c, 0.25))
+        scatter!(ax, [ellipse.origin]; legendmarkers["μ ± FWHM"][2]...)
+        scatter!(ax, xy; legendmarkers[replace(point_type, "_" => " ")]..., color = RGBA(c, 0.75))
+        scatter!(ax, [Point2f0(intended(k.group))]; legendmarkers["fictive burrow"]..., strokecolor = colors[k.group])
+    end
+    push!(axs, ax)
+end
+hideydecorations!(axs[1], grid = false, ticklabels = false, ticks = false)
+hideydecorations!(axs[2], grid = false)
+hidexdecorations!.(axs, grid = false, ticklabels = false, ticks = false)
+layout[2, 1:3] = LText(scene, "X (cm)");
+linkaxes!(axs...)
+label_c = layout[1, 2, TopLeft()] = LText(scene, "B");
+label_d = layout[1, 3, TopLeft()] = LText(scene, "C");
+x = copy(legendmarkers);
+x["track"] = (linestyle = nothing, color = :black);
+layout[1,4] = LLegend(scene, apply_element(values(legendmarkers)), collect(keys(legendmarkers)));
+resize!(scene, round.(Int, size(scene) .- unused_space(ax))...)
+FileIO.save("a.pdf", scene)
+FileIO.save(joinpath("figures", "figure 7.pdf"), scene)
+
+
+
+
+
+
+
+
+######################## Figure 5 ################ trying with out he open towards
+gdf = groupby(df, [:group, :nest_coverage])
+g = gdf[[(group = group, nest_coverage = "closed") for group in ("right","left","towards", "away")]]
+polys = OrderedDict(string(k.group) => (color = colors[k.group], strokecolor = :transparent) for k in keys(g))
+scene, layout = layoutscene(0)#, resolution = (493.228346, 200.0))
+ax = layout[1,1] = LAxis(scene)
+for gg in g
+    for r in eachrow(gg)
+        lines!(ax, r.track.coords, color = r.color, linewidth = 0.3)
+    end
+end
+hidexdecorations!(ax, grid = false, ticklabels = false, ticks = false)
+# hideydecorations!(ax, grid = false, ticklabels = false, ticks = false)
+# leg = ([LineElement(linestyle = nothing, color = colors[k]) for k in getfield.(NamedTuple.(keys(g)), :group)], get.(getfield.(NamedTuple.(keys(g)), :group)))
+# layout[1, 2] = LLegend(scene, leg...)
+layout[1, 1, TopLeft()] = LText(scene, "A");
+axs = []
+for (i, point_type) in enumerate(("turning_point", "center_of_search"))
+    ax = layout[1, i + 1] = LAxis(scene)
+    scatter!(ax, [zero(Point2f0)]; legendmarkers["nest"]...)
+    for (k, gg) in pairs(g)
+        xy = gg[!, point_type]
+        ellipse = getellipse(xy)
+        c = colors[k.group]
+        poly!(ax, mydecompose(ellipse), color = brighten(c, 0.25))
+        scatter!(ax, [ellipse.origin]; legendmarkers["μ ± FWHM"][2]...)
+        scatter!(ax, xy; legendmarkers[replace(point_type, "_" => " ")]..., color = RGBA(c, 0.75))
+        scatter!(ax, [Point2f0(intended(k.group))]; legendmarkers["fictive nest"]..., strokecolor = colors[k.group])
+    end
+    push!(axs, ax)
+end
+hideydecorations!(axs[1], grid = false, ticklabels = false, ticks = false)
+hideydecorations!(axs[2], grid = false)
+hidexdecorations!.(axs, grid = false, ticklabels = false, ticks = false)
+layout[2, 1:3] = LText(scene, "X (cm)");
+linkaxes!(axs...)
+label_c = layout[1, 2, TopLeft()] = LText(scene, "B");
+label_d = layout[1, 3, TopLeft()] = LText(scene, "C");
+x = copy(legendmarkers);
+x["track"] = (linestyle = nothing, color = :black);
+layout[3,1:3] = LLegend(scene, apply_element.(values.([polys, x])), collect.(keys.([polys, x])), ["Displacements", "Points"], orientation = :horizontal, nbanks = 2);
+resize!(scene, round.(Int, size(scene) .- unused_space(axs[1]))...)
+FileIO.save("a.pdf", scene)
+FileIO.save("a.png", scene)
+# FileIO.save(joinpath("figures", "figure 5.pdf"), scene)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # TODO: 
 # 1. the arrow for the feeder
@@ -556,41 +937,6 @@ end
 
 
 ############################## Closed nest ################################################
-
-roundsig(x) = x ≤ 0.05 ? @sprintf("%.2g", x) : "ns"
-
-d = filter(r -> r.group ∉ ("far", "back", "zero") && r.nest_coverage == "closed", df)
-
-HypothesisTests.pvalue(t::StatsModels.TableRegressionModel) = GLM.coeftable(t).cols[4][2]
-
-n = 10^6
-tbls = map((:turning_point, :gravity_center)) do point
-    data = by(d, :group) do g
-        μ = mean(g[!, point])
-        (centered = [p - μ for p in g[!, point]], )
-    end
-    x1 = [r.centered for r in eachrow(data) if r.group == "none"]
-    x2 = [r.centered for r in eachrow(data) if r.group ≠ "none"]
-    tx = ApproximatePermutationTest(first.(x1), first.(x2), var, n)
-    ty = ApproximatePermutationTest(last.(x1), last.(x2), var, n)
-    σ = pvalue.([tx, ty], tail = :left)
-    nσ = length(x1) + length(x2)
-    @printf "Is the %s variance of the none group, (%i, %i) significantly smaller than the variancve of the displaced groups, (%i, %i)? P = (%.2g, %.2g) (n = %i)\n" replace(string(point), '_' => ' ') var(x1)... var(x2)... σ... nσ
-    data = DataFrame((x = first(r[point]), y = first(intended[r.group])) for r in eachrow(d))
-    tx = lm(@formula(y ~ x), data)
-    data = DataFrame((x = last(r[point]), y = last(intended[r.group])) for r in eachrow(d))
-    ty = lm(@formula(y ~ x), data)
-    nμ = nrow(data)
-    @printf "Is the effect (%.2f, %.2f) of the displacement on the %s significant? P = (%.2g, %.2g) (n = %i)\n" coef(tx)[2] coef(ty)[2] replace(string(point), '_' => ' ') pvalue(tx) pvalue(ty) nμ
-    by(d, :group) do g
-        tx = OneSampleTTest(first.(g[!, point]), first(intended[g.group[1]]))
-        ty = OneSampleTTest(last.(g[!, point]), last(intended[g.group[1]]))
-        (turning_point = myformat([roundsig(pvalue(tx)), roundsig(pvalue(ty))]), n = nrow(g))
-    end
-end
-tbl = insertcols!(tbls[1], 3, :gravity_center => tbls[2][!,:turning_point])
-m = vcat(reshape(names(tbls[1]), 1, :), Matrix(tbl))
-writedlm(joinpath("tables", "table2.csv"), m, ',')
 
 ############################## open away ################################################
 
